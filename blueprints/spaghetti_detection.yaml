@@ -1,16 +1,16 @@
 blueprint:
-  name: Bambu Lab P1 - Spaghetti Detection
-  description: Bambu Lab P1 - Spaghetti Detection
+  name: Bambu Lab P1S - Spaghetti Detection
+  description: Bambu Lab P1S - Spaghetti Detection
   domain: automation
   input:
     home_assistant_host:
       name: Home Assistant Host
       description: Home Assistant host
-      default: "http://192.168.1.123:8123"
+      default: "http://10.0.0.127:8123"
     obico_host:
       name: Obico ML API Host
       description: Obico ML API host
-      default: "http://192.168.1.123:3333"
+      default: "http://10.0.0.127:3333"
     obico_auth_token:
       name: Obico ML API Auth Token
       description: Obico ML API authentication token
@@ -21,9 +21,32 @@ blueprint:
       default: true
       selector:
         boolean:
-    notification_settings:
-      name: Notification Settings
-      description: Type of notification to send after detecting a failure
+    confidence_threshold:
+      name: Confidence Threshold
+      description: Confidence threshold (1-100) for pausing the print. Below this, it will only warn.
+      default: 66
+      selector:
+        number:
+          min: 1
+          max: 100
+          step: 1
+    notification_settings_above_threshold:
+      name: Notification Settings (Above Threshold)
+      description: Type of notification to send when confidence is above or equal to the threshold
+      default: critical
+      selector:
+        select:
+          mode: dropdown
+          options:
+            - label: Critical Notification
+              value: critical
+            - label: Standard Notification
+              value: standard
+            - label: None
+              value: none
+    notification_settings_below_threshold:
+      name: Notification Settings (Below Threshold)
+      description: Type of notification to send when confidence is below the threshold
       default: standard
       selector:
         select:
@@ -120,7 +143,9 @@ variables:
   HOME_ASSISTANT_HOST_VAR: !input home_assistant_host
   PRINTER_CAMERA_IMG_VAR: !input printer_camera_image
   FAILURE_ACTION_VAR: !input failure_action
-  NOTIFICATION_SETTINGS_VAR: !input notification_settings
+  NOTIFICATION_SETTINGS_ABOVE_VAR: !input notification_settings_above_threshold
+  NOTIFICATION_SETTINGS_BELOW_VAR: !input notification_settings_below_threshold
+  CONFIDENCE_THRESHOLD_VAR: !input confidence_threshold
 mode: single
 max_exceeded: silent
 trigger:
@@ -403,63 +428,101 @@ action:
             alias: >-
               if now() - last_notify_time < 1min
 
+          - variables:
+              detected_confidence: "{{ (states('number.bambu_lab_p1_spaghetti_detection_normalized_p') | float * 100) | int }}"
+          
           - choose:
               - conditions:
                   - condition: template
-                    value_template: "{{ FAILURE_ACTION_VAR == 'pause' }}"
+                    value_template: "{{ detected_confidence >= CONFIDENCE_THRESHOLD_VAR }}"
                 sequence:
-                  - service: button.press
-                    data: { }
-                    target:
-                      entity_id: !input printer_pause_button
-              - conditions:
-                  - condition: template
-                    value_template: "{{ FAILURE_ACTION_VAR == 'stop' }}"
-                sequence:
-                  - service: button.press
-                    data: { }
-                    target:
-                      entity_id: !input printer_stop_button
+                  - choose:
+                      - conditions:
+                          - condition: template
+                            value_template: "{{ FAILURE_ACTION_VAR == 'pause' }}"
+                        sequence:
+                          - service: button.press
+                            data: { }
+                            target:
+                              entity_id: !input printer_pause_button
+                      - conditions:
+                          - condition: template
+                            value_template: "{{ FAILURE_ACTION_VAR == 'stop' }}"
+                        sequence:
+                          - service: button.press
+                            data: { }
+                            target:
+                              entity_id: !input printer_stop_button
+                  - choose:
+                      - conditions:
+                          - condition: template
+                            value_template: "{{ NOTIFICATION_SETTINGS_ABOVE_VAR == 'critical' }}"
+                        sequence:
+                          - service: !input notification_service
+                            data:
+                              title: "Bambu Lab P1 - Spaghetti Detected (Action Taken)"
+                              message: "Confidence: {{ detected_confidence }}%"
+                              data:
+                                image: "{{ HOME_ASSISTANT_HOST_VAR }}{{ state_attr(PRINTER_CAMERA_IMG_VAR, 'entity_picture') }}"
+                                ttl: 0
+                                priority: high
+                                channel: alarm_stream
+                                push:
+                                  sound:
+                                    name: default
+                                    critical: 1
+                                    volume: 0.75
+                                actions:
+                                  - action: BAMBU_LAB_RESUME_PRINTING
+                                    title: Resume Printing
+                                  - action: BAMBU_LAB_STOP_PRINTING
+                                    title: Stop Printing
+                      - conditions:
+                          - condition: template
+                            value_template: "{{ NOTIFICATION_SETTINGS_ABOVE_VAR == 'standard' }}"
+                        sequence:
+                          - service: !input notification_service
+                            data:
+                              title: "Bambu Lab P1 - Spaghetti Detected (Action Taken)"
+                              message: "Confidence: {{ detected_confidence }}%"
+                              data:
+                                image: "{{ HOME_ASSISTANT_HOST_VAR }}{{ state_attr(PRINTER_CAMERA_IMG_VAR, 'entity_picture') }}"
+                                actions:
+                                  - action: BAMBU_LAB_RESUME_PRINTING
+                                    title: Resume Printing
+                                  - action: BAMBU_LAB_STOP_PRINTING
+                                    title: Stop Printing
+            default:
+              - choose:
+                  - conditions:
+                      - condition: template
+                        value_template: "{{ NOTIFICATION_SETTINGS_BELOW_VAR == 'critical' }}"
+                    sequence:
+                      - service: !input notification_service
+                        data:
+                          title: "Bambu Lab P1 - Potential Spaghetti Detected (Warning)"
+                          message: "Confidence: {{ detected_confidence }}%"
+                          data:
+                            image: "{{ HOME_ASSISTANT_HOST_VAR }}{{ state_attr(PRINTER_CAMERA_IMG_VAR, 'entity_picture') }}"
+                            ttl: 0
+                            priority: high
+                            channel: alarm_stream
+                            push:
+                              sound:
+                                name: default
+                                critical: 1
+                                volume: 0.75
+                  - conditions:
+                      - condition: template
+                        value_template: "{{ NOTIFICATION_SETTINGS_BELOW_VAR == 'standard' }}"
+                    sequence:
+                      - service: !input notification_service
+                        data:
+                          title: "Bambu Lab P1 - Potential Spaghetti Detected (Warning)"
+                          message: "Confidence: {{ detected_confidence }}%"
+                          data:
+                            image: "{{ HOME_ASSISTANT_HOST_VAR }}{{ state_attr(PRINTER_CAMERA_IMG_VAR, 'entity_picture') }}"
 
-          - choose:
-              - conditions:
-                  - condition: template
-                    value_template: "{{ NOTIFICATION_SETTINGS_VAR == 'critical' }}"
-                sequence:
-                  - service: !input notification_service
-                    data:
-                      title: "Bambu Lab P1 - Spaghetti Detected"
-                      message: "Confidence: {{ (states('number.bambu_lab_p1_spaghetti_detection_normalized_p') | float * 100) | int }}%"
-                      data:
-                        image: "{{ HOME_ASSISTANT_HOST_VAR }}{{ state_attr(PRINTER_CAMERA_IMG_VAR, 'entity_picture') }}"
-                        ttl: 0
-                        priority: high
-                        channel: alarm_stream
-                        push:
-                          sound:
-                            name: default
-                            critical: 1
-                            volume: 0.75
-                        actions:
-                          - action: BAMBU_LAB_RESUME_PRINTING
-                            title: Resume Printing
-                          - action: BAMBU_LAB_STOP_PRINTING
-                            title: Stop Printing
-              - conditions:
-                  - condition: template
-                    value_template: "{{ NOTIFICATION_SETTINGS_VAR == 'standard' }}"
-                sequence:
-                  - service: !input notification_service
-                    data:
-                      title: "Bambu Lab P1 - Spaghetti Detected"
-                      message: "Confidence: {{ (states('number.bambu_lab_p1_spaghetti_detection_normalized_p') | float * 100) | int }}%"
-                      data:
-                        image: "{{ HOME_ASSISTANT_HOST_VAR }}{{ state_attr(PRINTER_CAMERA_IMG_VAR, 'entity_picture') }}"
-                        actions:
-                          - action: BAMBU_LAB_RESUME_PRINTING
-                            title: Resume Printing
-                          - action: BAMBU_LAB_STOP_PRINTING
-                            title: Stop Printing
           - service: number.set_value
             data:
               value: 0
@@ -478,5 +541,3 @@ action:
                 {{ now() }}
             target:
               entity_id: datetime.bambu_lab_p1_spaghetti_detection_last_notify_time
-
-
